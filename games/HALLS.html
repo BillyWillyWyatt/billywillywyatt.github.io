@@ -1,0 +1,795 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Halls — Levels</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#111;color:#fff;font:16px Arial,sans-serif}
+#game{display:block;width:100vw;height:100vh}
+#help{position:fixed;top:12px;left:125px;text-shadow:0 1px 4px #000;pointer-events:none}
+#fullscreen{position:fixed;top:10px;left:10px;padding:7px 10px;font-size:12px}
+#pause{position:fixed;top:10px;right:145px;padding:7px 10px;font-size:12px;color:white;background:#333d;border:1px solid #aaa;border-radius:4px}
+#mapBox{position:fixed;top:10px;right:10px;width:110px;height:110px;background:#111d;border:2px solid #d8cc91;border-radius:5px;overflow:hidden;transition:width .12s,height .12s}
+#mapBox.enlarged{width:min(72vw,420px);height:min(72vw,420px)}
+#mapTitle{position:absolute;top:3px;left:0;right:0;text-align:center;font-size:10px;text-shadow:0 1px 3px #000;pointer-events:none}
+#map{width:100%;height:100%;display:block}
+#levelLabel{position:fixed;top:12px;left:50%;transform:translateX(-50%);text-shadow:0 1px 4px #000;pointer-events:none}
+
+#overlay{
+  position:fixed;
+  inset:0;
+  background:#000c;
+  display:grid;
+  place-content:center;
+  text-align:center;
+  gap:14px;
+  padding:20px;
+  transition:background .25s;
+}
+#overlay.level0{
+  background:linear-gradient(#17150fc9,#17150fc9),#443b27;
+}
+#overlay.poolrooms{
+  background:linear-gradient(#183b3ac7,#183b3ac7),#48aeb0;
+}
+#overlay.warehouse{
+  background:linear-gradient(#242827c9,#242827c9),#55595a;
+}
+
+button{cursor:pointer;background:#e2cb62;border:0;border-radius:5px}
+#play,#freeMode{font-size:18px;padding:12px 26px}
+#levelSelect{font-size:16px;padding:9px 12px;border-radius:5px}
+#settingsPanel{display:none;gap:12px;align-items:center;justify-items:center;background:#222;padding:16px;border:1px solid #aaa;border-radius:8px;min-width:260px}
+#settingsPanel label{display:grid;gap:8px}
+#settingsPanel input{width:220px}
+#settingsPanel button{padding:8px 16px}
+.menuAction{font-size:16px;padding:10px 22px}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="fullscreen">FULLSCREEN</button>
+<div id="help">WASD: move · Mouse: look · M: enlarge map · Space: pause</div>
+<div id="levelLabel"></div>
+<button id="pause" hidden>PAUSE</button>
+<div id="mapBox"><div id="mapTitle">MAP · HOLD M</div><canvas id="map"></canvas></div>
+
+<div id="overlay" class="level0">
+  <h1>HALLS</h1>
+  <p>Find the exit. Avoid the creature.</p>
+
+  <label for="levelSelect">Select level:</label>
+  <select id="levelSelect">
+    <option value="1">LEVEL 0</option>
+    <option value="2">POOLROOMS</option>
+    <option value="3">WAREHOUSE</option>
+  </select>
+
+  <button id="play">PLAY</button>
+  <button id="freeMode">FREE MODE</button>
+  <button id="settingsButton" class="menuAction">SETTINGS</button>
+  <button id="menuButton" class="menuAction" style="display:none">RETURN TO MENU</button>
+
+  <div id="settingsPanel">
+    <strong>Settings</strong>
+    <label>Mouse-look sensitivity: <span id="speedValue">0.25</span>
+      <input id="speedSlider" type="range" min="0.05" max="1" step="0.05" value="0.25">
+    </label>
+    <button id="backButton">BACK</button>
+  </div>
+</div>
+
+<script>
+(() => {
+"use strict";
+
+const canvas=document.querySelector("#game");
+const ctx=canvas.getContext("2d");
+const mapCanvas=document.querySelector("#map");
+const mapCtx=mapCanvas.getContext("2d");
+const mapBox=document.querySelector("#mapBox");
+const overlay=document.querySelector("#overlay");
+const title=overlay.querySelector("h1");
+const message=overlay.querySelector("p");
+const playButton=document.querySelector("#play");
+const freeModeButton=document.querySelector("#freeMode");
+const levelSelect=document.querySelector("#levelSelect");
+const pauseButton=document.querySelector("#pause");
+const fullscreenButton=document.querySelector("#fullscreen");
+const settingsButton=document.querySelector("#settingsButton");
+const menuButton=document.querySelector("#menuButton");
+const settingsPanel=document.querySelector("#settingsPanel");
+const speedSlider=document.querySelector("#speedSlider");
+const speedValue=document.querySelector("#speedValue");
+const backButton=document.querySelector("#backButton");
+const levelLabel=document.querySelector("#levelLabel");
+
+const FOV=Math.PI/3;
+const PLAYER_HEIGHT=.5;
+let SIZE=15;
+let level=1;
+let maze=[];
+let player={x:1.5,y:1.5,a:0};
+let monster={x:13.5,y:1.5};
+let exit={x:13.5,y:13.5};
+let keys=new Set();
+let active=false;
+let paused=false;
+let finished=false;
+let freeMode=false;
+let lastTime=0;
+let audio=null;
+let walkTimer=0;
+let proximityTimer=0;
+let mouseSensitivity=.0025;
+let ceilingPanels=[];
+
+function resize(){
+  const d=Math.min(window.devicePixelRatio||1,2);
+  canvas.width=Math.max(1,Math.floor(innerWidth*d));
+  canvas.height=Math.max(1,Math.floor(innerHeight*d));
+  ctx.setTransform(d,0,0,d,0,0);
+}
+addEventListener("resize",resize);
+resize();
+
+function levelName(n){
+  return n===1?"LEVEL 0":n===2?"POOLROOMS":"WAREHOUSE";
+}
+
+function updateMenuBackground(){
+  overlay.classList.remove("level0","poolrooms","warehouse");
+  const selected=Number(levelSelect.value);
+  overlay.classList.add(
+    selected===1?"level0":
+    selected===2?"poolrooms":
+    "warehouse"
+  );
+}
+levelSelect.addEventListener("change",updateMenuBackground);
+updateMenuBackground();
+
+function makeMaze(){
+  SIZE=level===1?15:(level===2?19:23);
+  maze=Array.from({length:SIZE},()=>Array(SIZE).fill(1));
+
+  const stack=[[1,1]];
+  maze[1][1]=0;
+
+  while(stack.length){
+    const [x,y]=stack[stack.length-1];
+    const dirs=[[0,-2],[2,0],[0,2],[-2,0]];
+
+    for(let i=dirs.length-1;i>0;i--){
+      const j=Math.floor(Math.random()*(i+1));
+      [dirs[i],dirs[j]]=[dirs[j],dirs[i]];
+    }
+
+    let carved=false;
+    for(const [dx,dy] of dirs){
+      const nx=x+dx,ny=y+dy;
+      if(nx>0&&nx<SIZE-1&&ny>0&&ny<SIZE-1&&maze[ny][nx]===1){
+        maze[y+dy/2][x+dx/2]=0;
+        maze[ny][nx]=0;
+        stack.push([nx,ny]);
+        carved=true;
+        break;
+      }
+    }
+    if(!carved)stack.pop();
+  }
+
+  if(level===1){
+    for(let i=0;i<12;i++){
+      const x=1+Math.floor(Math.random()*(SIZE-2));
+      const y=1+Math.floor(Math.random()*(SIZE-2));
+      if(maze[y][x]===1&&
+         ((maze[y-1][x]===0&&maze[y+1][x]===0)||
+          (maze[y][x-1]===0&&maze[y][x+1]===0))){
+        maze[y][x]=0;
+      }
+    }
+  }
+
+  ceilingPanels=[];
+  for(let y=1;y<SIZE-1;y++){
+    for(let x=1;x<SIZE-1;x++){
+      if(maze[y][x]===0)ceilingPanels.push({x:x+.5,y:y+.5});
+    }
+  }
+}
+
+function wall(x,y){
+  const row=maze[Math.floor(y)];
+  return !row||row[Math.floor(x)]!==0;
+}
+
+function move(obj,dx,dy,r=.16){
+  if(!wall(obj.x+dx+Math.sign(dx)*r,obj.y))obj.x+=dx;
+  if(!wall(obj.x,obj.y+dy+Math.sign(dy)*r))obj.y+=dy;
+}
+
+function ray(angle){
+  const step=.045;
+  for(let d=0;d<35;d+=step){
+    const x=player.x+Math.cos(angle)*d;
+    const y=player.y+Math.sin(angle)*d;
+    if(wall(x,y))return{d:Math.max(d,.01),x,y};
+  }
+  return{d:35,x:player.x,y:player.y};
+}
+
+function beep(freq,duration=.12,type="sine",volume=.04){
+  try{
+    if(!audio)audio=new(window.AudioContext||window.webkitAudioContext)();
+    if(audio.state==="suspended")audio.resume();
+    const osc=audio.createOscillator();
+    const gain=audio.createGain();
+    osc.type=type;
+    osc.frequency.setValueAtTime(freq,audio.currentTime);
+    gain.gain.setValueAtTime(volume,audio.currentTime);
+    gain.gain.exponentialRampToValueAtTime(.001,audio.currentTime+duration);
+    osc.connect(gain);
+    gain.connect(audio.destination);
+    osc.start();
+    osc.stop(audio.currentTime+duration);
+  }catch(e){}
+}
+
+function drawMap(){
+  const d=Math.min(window.devicePixelRatio||1,2);
+  const r=mapCanvas.getBoundingClientRect();
+  const w=Math.max(1,Math.floor(r.width*d));
+  const h=Math.max(1,Math.floor(r.height*d));
+
+  if(mapCanvas.width!==w||mapCanvas.height!==h){
+    mapCanvas.width=w;
+    mapCanvas.height=h;
+  }
+
+  mapCtx.setTransform(d,0,0,d,0,0);
+  const cw=r.width/SIZE;
+  const ch=r.height/SIZE;
+  mapCtx.clearRect(0,0,r.width,r.height);
+
+  for(let y=0;y<SIZE;y++){
+    for(let x=0;x<SIZE;x++){
+      if(level===2){
+        mapCtx.fillStyle=maze[y][x]?"#d5d0ba":"#54bfc0";
+      }else if(level===3){
+        mapCtx.fillStyle=maze[y][x]?"#737675":"#292c2c";
+      }else{
+        mapCtx.fillStyle=maze[y][x]?"#887b59":"#171713";
+      }
+      mapCtx.fillRect(x*cw,y*ch,cw+.5,ch+.5);
+    }
+  }
+
+  mapCtx.fillStyle="#25ff65";
+  mapCtx.beginPath();
+  mapCtx.arc(exit.x*cw,exit.y*ch,Math.max(3,cw*.28),0,Math.PI*2);
+  mapCtx.fill();
+
+  if(!freeMode){
+    mapCtx.fillStyle="#ff3434";
+    mapCtx.beginPath();
+    mapCtx.arc(monster.x*cw,monster.y*ch,Math.max(3,cw*.23),0,Math.PI*2);
+    mapCtx.fill();
+  }
+
+  mapCtx.fillStyle="#5ecbff";
+  mapCtx.beginPath();
+  mapCtx.arc(player.x*cw,player.y*ch,Math.max(3,cw*.23),0,Math.PI*2);
+  mapCtx.fill();
+
+  mapCtx.strokeStyle="#5ecbff";
+  mapCtx.lineWidth=2;
+  mapCtx.beginPath();
+  mapCtx.moveTo(player.x*cw,player.y*ch);
+  mapCtx.lineTo(
+    (player.x+Math.cos(player.a)*.8)*cw,
+    (player.y+Math.sin(player.a)*.8)*ch
+  );
+  mapCtx.stroke();
+}
+
+function drawSprite(obj,color,label,size){
+  let angle=Math.atan2(obj.y-player.y,obj.x-player.x)-player.a;
+  while(angle>Math.PI)angle-=Math.PI*2;
+  while(angle<-Math.PI)angle+=Math.PI*2;
+
+  const dist=Math.hypot(obj.x-player.x,obj.y-player.y);
+  if(Math.abs(angle)>FOV*.7||dist<.1||ray(player.a+angle).d<dist-.25)return;
+
+  const sx=innerWidth*(.5+angle/FOV);
+  const sh=Math.min(innerHeight*1.4,innerHeight*size/dist);
+
+  ctx.globalAlpha=Math.max(.35,1-dist/22);
+  ctx.fillStyle=color;
+  ctx.shadowColor=color;
+  ctx.shadowBlur=16;
+  ctx.fillRect(sx-sh*.22,innerHeight/2-sh/2,sh*.44,sh);
+  ctx.shadowBlur=0;
+
+  if(label){
+    ctx.textAlign="center";
+    ctx.font=`bold ${Math.max(12,sh*.14)}px Arial`;
+    ctx.fillText(label,sx,innerHeight/2-sh*.58);
+  }
+  ctx.globalAlpha=1;
+}
+
+function projectCeilingPoint(x,y,z){
+  const dx=x-player.x;
+  const dy=y-player.y;
+  const forward=dx*Math.cos(player.a)+dy*Math.sin(player.a);
+  const sideways=-dx*Math.sin(player.a)+dy*Math.cos(player.a);
+  if(forward<=.08)return null;
+
+  const focal=innerWidth/(2*Math.tan(FOV/2));
+  return{
+    x:innerWidth/2+(sideways/forward)*focal,
+    y:innerHeight/2-((z-PLAYER_HEIGHT)/forward)*focal
+  };
+}
+
+function drawCeilingLights(){
+  if(level!==1)return;
+
+  for(const panel of ceilingPanels){
+    const dx=panel.x-player.x;
+    const dy=panel.y-player.y;
+    const dist=Math.hypot(dx,dy);
+    if(dist>9)continue;
+
+    const corners=[
+      projectCeilingPoint(panel.x-.32,panel.y-.17,1.9),
+      projectCeilingPoint(panel.x+.32,panel.y-.17,1.9),
+      projectCeilingPoint(panel.x+.32,panel.y+.17,1.9),
+      projectCeilingPoint(panel.x-.32,panel.y+.17,1.9)
+    ];
+    if(corners.some(p=>!p))continue;
+
+    if(ray(Math.atan2(dy,dx)).d<dist-.35)continue;
+
+    const glow=Math.max(.12,1-dist/10);
+    ctx.globalAlpha=glow;
+    ctx.fillStyle="#fff8dd";
+    ctx.shadowColor="#ffe6a1";
+    ctx.shadowBlur=18*glow;
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x,corners[0].y);
+    for(let i=1;i<corners.length;i++)ctx.lineTo(corners[i].x,corners[i].y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.strokeStyle="rgba(255,255,230,.95)";
+    ctx.lineWidth=1.5;
+    ctx.stroke();
+    ctx.globalAlpha=1;
+  }
+}
+
+function drawWarehouseDetails(w,h){
+  ctx.save();
+  ctx.globalAlpha=.2;
+  ctx.strokeStyle="#c2c5c0";
+  ctx.lineWidth=2;
+
+  for(let i=0;i<7;i++){
+    const y=h*.52+i*i*h*.008;
+    ctx.beginPath();
+    ctx.moveTo(0,y);
+    ctx.lineTo(w,y);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle="#d2bc6f";
+  ctx.lineWidth=3;
+  ctx.beginPath();
+  ctx.moveTo(w*.38,h);
+  ctx.lineTo(w*.48,h*.53);
+  ctx.moveTo(w*.62,h);
+  ctx.lineTo(w*.52,h*.53);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function draw(){
+  const w=innerWidth;
+  const h=innerHeight;
+  const pool=level===2;
+  const warehouse=level===3;
+
+  if(pool){
+    ctx.fillStyle="#a6c5bb";
+    ctx.fillRect(0,0,w,h/2);
+    ctx.fillStyle="#48aeb0";
+    ctx.fillRect(0,h/2,w,h/2);
+  }else if(warehouse){
+    ctx.fillStyle="#45494a";
+    ctx.fillRect(0,0,w,h/2);
+    ctx.fillStyle="#292d2e";
+    ctx.fillRect(0,h/2,w,h/2);
+  }else{
+    ctx.fillStyle="#282317";
+    ctx.fillRect(0,0,w,h/2);
+    ctx.fillStyle="#40382c";
+    ctx.fillRect(0,h/2,w,h/2);
+  }
+
+  const rays=Math.max(160,Math.min(480,Math.ceil(w/3)));
+  const columnWidth=w/rays;
+
+  for(let i=0;i<rays;i++){
+    const angle=player.a+(i/rays-.5)*FOV;
+    const hit=ray(angle);
+    const dist=Math.max(.08,hit.d*Math.cos(angle-player.a));
+    const wallHeight=Math.min(h*1.8,h*.9/dist);
+    const shade=Math.max(24,185-dist*13);
+    const top=h/2-wallHeight/2;
+
+    if(pool){
+      const light=Math.max(.38,1-dist/30);
+      ctx.fillStyle=`rgb(${Math.floor(205*light)},${Math.floor(215*light)},${Math.floor(192*light)})`;
+    }else if(warehouse){
+      const light=Math.max(.32,1-dist/38);
+      const c=Math.floor(145*light);
+      ctx.fillStyle=`rgb(${c},${Math.floor(c*1.02)},${Math.floor(c*.96)})`;
+    }else{
+      ctx.fillStyle=`rgb(${shade},${Math.floor(shade*.85)},${Math.floor(shade*.57)})`;
+    }
+
+    ctx.fillRect(i*columnWidth,top,columnWidth+1,wallHeight);
+
+    if(pool&&wallHeight>12){
+      ctx.fillStyle="rgba(77,142,140,.32)";
+      ctx.fillRect(i*columnWidth,top+wallHeight*.34,columnWidth+1,1);
+      ctx.fillRect(i*columnWidth,top+wallHeight*.67,columnWidth+1,1);
+    }
+
+    if(warehouse&&wallHeight>20){
+      ctx.fillStyle="rgba(75,77,76,.28)";
+      ctx.fillRect(i*columnWidth,top+wallHeight*.5,columnWidth+1,2);
+    }
+  }
+
+  if(pool){
+    const water=ctx.createLinearGradient(0,h*.5,0,h);
+    water.addColorStop(0,"rgba(75,204,198,.04)");
+    water.addColorStop(1,"rgba(35,161,168,.3)");
+    ctx.fillStyle=water;
+    ctx.fillRect(0,h*.5,w,h*.5);
+  }
+
+  if(warehouse)drawWarehouseDetails(w,h);
+  if(level===1)drawCeilingLights();
+
+  drawSprite(exit,"#20ff62","EXIT",.55);
+
+  if(!freeMode){
+    drawSprite(monster,pool?"#ddd9c8":"#c8c2b2","",.85);
+    drawMonsterFace();
+  }
+
+  ctx.strokeStyle="#ffffff99";
+  ctx.beginPath();
+  ctx.moveTo(w/2-6,h/2);
+  ctx.lineTo(w/2+6,h/2);
+  ctx.moveTo(w/2,h/2-6);
+  ctx.lineTo(w/2,h/2+6);
+  ctx.stroke();
+}
+
+function drawMonsterFace(){
+  let angle=Math.atan2(monster.y-player.y,monster.x-player.x)-player.a;
+  while(angle>Math.PI)angle-=Math.PI*2;
+  while(angle<-Math.PI)angle+=Math.PI*2;
+
+  const dist=Math.hypot(monster.x-player.x,monster.y-player.y);
+  if(Math.abs(angle)>FOV*.7||dist<.1||ray(player.a+angle).d<dist-.25)return;
+
+  const sx=innerWidth*(.5+angle/FOV);
+  const sh=Math.min(innerHeight*1.4,innerHeight*.8/dist);
+
+  ctx.fillStyle="#ff2525";
+  ctx.shadowColor="red";
+  ctx.shadowBlur=12;
+  ctx.fillRect(sx-sh*.12,innerHeight/2-sh*.25,sh*.07,sh*.035);
+  ctx.fillRect(sx+sh*.05,innerHeight/2-sh*.25,sh*.07,sh*.035);
+  ctx.shadowBlur=0;
+}
+
+function showMainOverlay(){
+  settingsPanel.style.display="none";
+  title.style.display="";
+  message.style.display="";
+  levelSelect.style.display="";
+  playButton.style.display="";
+  freeModeButton.style.display="";
+  settingsButton.style.display="";
+  menuButton.style.display="none";
+  updateMenuBackground();
+}
+
+function placeMonster(){
+  const spots=[];
+  for(let y=1;y<SIZE-1;y++){
+    for(let x=1;x<SIZE-1;x++){
+      const px=x+.5,py=y+.5;
+      if(maze[y][x]===0&&
+         Math.hypot(px-player.x,py-player.y)>5&&
+         Math.hypot(px-exit.x,py-exit.y)>3){
+        spots.push([px,py]);
+      }
+    }
+  }
+  return spots[Math.floor(Math.random()*spots.length)]||[SIZE-2.5,1.5];
+}
+
+function beginLevel(newLevel){
+  level=newLevel;
+  makeMaze();
+
+  player={x:1.5,y:1.5,a:0};
+  exit={x:SIZE-1.5,y:SIZE-1.5};
+
+  const spot=placeMonster();
+  monster={x:spot[0],y:spot[1]};
+
+  walkTimer=0;
+  proximityTimer=0;
+  levelLabel.textContent=levelName(level);
+}
+
+function start(isFreeMode=false){
+  freeMode=isFreeMode;
+  finished=false;
+  paused=false;
+  keys.clear();
+  beginLevel(Number(levelSelect.value));
+
+  active=true;
+  pauseButton.hidden=false;
+  pauseButton.textContent="PAUSE";
+  overlay.style.display="none";
+  canvas.requestPointerLock?.();
+}
+
+function finish(won){
+  if(finished)return;
+  finished=true;
+  active=false;
+  paused=false;
+
+  if(document.pointerLockElement)document.exitPointerLock();
+
+  pauseButton.hidden=true;
+  overlay.style.display="grid";
+  title.textContent=won?"YOU ESCAPED":"CAUGHT";
+  message.textContent=won
+    ?"You found the exit!"
+    :"The creature caught you. Try again?";
+
+  showMainOverlay();
+  playButton.textContent="PLAY";
+  beep(won?660:100,.45,won?"sine":"sawtooth",.06);
+}
+
+function showSettings(){
+  if(!paused)return;
+  title.style.display="none";
+  message.style.display="none";
+  levelSelect.style.display="none";
+  playButton.style.display="none";
+  freeModeButton.style.display="none";
+  settingsButton.style.display="none";
+  menuButton.style.display="none";
+  settingsPanel.style.display="grid";
+}
+
+function showPauseMenu(){
+  settingsPanel.style.display="none";
+  title.style.display="";
+  message.style.display="";
+  levelSelect.style.display="none";
+  playButton.style.display="";
+  freeModeButton.style.display="none";
+  settingsButton.style.display="";
+  menuButton.style.display="";
+  title.textContent="PAUSED";
+  message.textContent=`${levelName(level)} is paused.`;
+  playButton.textContent="RESUME";
+}
+
+function returnToMenu(){
+  active=false;
+  paused=false;
+  finished=false;
+  freeMode=false;
+  keys.clear();
+
+  if(document.pointerLockElement)document.exitPointerLock();
+
+  pauseButton.hidden=true;
+  levelLabel.textContent="";
+  overlay.style.display="grid";
+  title.textContent="HALLS";
+  message.textContent="Find the exit. Avoid the creature.";
+  playButton.textContent="PLAY";
+  showMainOverlay();
+}
+
+function togglePause(){
+  if(!active||finished)return;
+
+  paused=!paused;
+  pauseButton.textContent=paused?"RESUME":"PAUSE";
+
+  if(paused){
+    keys.clear();
+    if(document.pointerLockElement)document.exitPointerLock();
+    overlay.style.display="grid";
+    showPauseMenu();
+  }else{
+    overlay.style.display="none";
+  }
+}
+
+playButton.addEventListener("click",()=>{
+  if(paused){
+    paused=false;
+    overlay.style.display="none";
+    pauseButton.textContent="PAUSE";
+  }else{
+    start(false);
+  }
+});
+
+freeModeButton.addEventListener("click",()=>start(true));
+pauseButton.addEventListener("click",togglePause);
+settingsButton.addEventListener("click",showSettings);
+menuButton.addEventListener("click",returnToMenu);
+backButton.addEventListener("click",showPauseMenu);
+
+speedSlider.addEventListener("input",()=>{
+  mouseSensitivity=Number(speedSlider.value)*.01;
+  speedValue.textContent=Number(speedSlider.value).toFixed(2);
+});
+
+fullscreenButton.addEventListener("click",async()=>{
+  try{
+    if(!document.fullscreenElement){
+      await document.documentElement.requestFullscreen();
+    }else{
+      await document.exitFullscreen();
+    }
+    resize();
+  }catch(e){}
+});
+
+document.addEventListener("fullscreenchange",resize);
+
+addEventListener("keydown",e=>{
+  const k=e.key.toLowerCase();
+
+  if(k==="escape"){
+    if(document.fullscreenElement)document.exitFullscreen();
+    return;
+  }
+
+  if(k===" "||k==="spacebar"){
+    e.preventDefault();
+    if(!e.repeat)togglePause();
+    return;
+  }
+
+  if(k==="m"){
+    mapBox.classList.add("enlarged");
+    e.preventDefault();
+    return;
+  }
+
+  if(["w","a","s","d","arrowup","arrowdown","arrowleft","arrowright"].includes(k)){
+    keys.add(k);
+    e.preventDefault();
+  }
+});
+
+addEventListener("keyup",e=>{
+  const k=e.key.toLowerCase();
+  keys.delete(k);
+  if(k==="m")mapBox.classList.remove("enlarged");
+});
+
+addEventListener("blur",()=>{
+  keys.clear();
+  mapBox.classList.remove("enlarged");
+});
+
+canvas.addEventListener("click",()=>{
+  if(active&&!paused)canvas.requestPointerLock?.();
+});
+
+addEventListener("mousemove",e=>{
+  if(active&&!paused&&document.pointerLockElement===canvas){
+    player.a+=e.movementX*mouseSensitivity;
+  }
+});
+
+function update(dt){
+  if(!active||paused)return;
+
+  if(keys.has("arrowleft"))player.a-=1.8*dt;
+  if(keys.has("arrowright"))player.a+=1.8*dt;
+
+  const forward=(keys.has("w")||keys.has("arrowup")?1:0)-
+                (keys.has("s")||keys.has("arrowdown")?1:0);
+  const sideways=(keys.has("d")?1:0)-(keys.has("a")?1:0);
+  const len=Math.hypot(forward,sideways)||1;
+  const speed=2.8*dt;
+
+  const dx=(Math.cos(player.a)*forward+
+            Math.cos(player.a+Math.PI/2)*sideways)*speed/len;
+  const dy=(Math.sin(player.a)*forward+
+            Math.sin(player.a+Math.PI/2)*sideways)*speed/len;
+
+  if(forward||sideways){
+    move(player,dx,dy);
+    walkTimer-=dt;
+    if(walkTimer<=0){
+      beep(level===2?105:75,.075,"triangle",.025);
+      walkTimer=level===2?.5:.38;
+    }
+  }else{
+    walkTimer=0;
+  }
+
+  if(Math.hypot(player.x-exit.x,player.y-exit.y)<.62){
+    finish(true);
+    return;
+  }
+
+  if(freeMode)return;
+
+  const mx=player.x-monster.x;
+  const my=player.y-monster.y;
+  const dist=Math.hypot(mx,my);
+
+  proximityTimer-=dt;
+  if(dist<6&&proximityTimer<=0){
+    const urgency=Math.max(0,1-dist/6);
+    beep(180+urgency*100,.14,"sine",.012+urgency*.02);
+    proximityTimer=Math.max(.45,1.2-dist*.12);
+  }
+
+  if(dist>1.05&&dist<12){
+    const difficulty=level===2?1.2:level===3?1.1:1;
+    const monsterSpeed=(dist<5?1.05:.7)*difficulty*dt;
+    move(monster,mx/dist*monsterSpeed,my/dist*monsterSpeed,.14);
+  }
+
+  if(dist<.62)finish(false);
+}
+
+function frame(now){
+  const dt=Math.min((now-lastTime)/1000||0,.05);
+  lastTime=now;
+
+  update(dt);
+  draw();
+  drawMap();
+  requestAnimationFrame(frame);
+}
+
+makeMaze();
+player={x:1.5,y:1.5,a:0};
+exit={x:SIZE-1.5,y:SIZE-1.5};
+monster={x:SIZE-2.5,y:1.5};
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
